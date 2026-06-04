@@ -1,0 +1,48 @@
+{
+    "name": "wlroots",
+    "build": {
+        "dockerfile": "Dockerfile"
+    },
+    "customizations": {
+        "vscode": {
+            "extensions": [
+                "DavidAnson.vscode-markdownlint",
+                "esbenp.prettier-vscode",
+                "ms-vscode.cpptools",
+                "ms-vscode.cpptools-extension-pack",
+                "ms-vscode.makefile-tools"
+            ],
+            "settings": {
+                "[markdown]": {
+                    "editor.defaultFormatter": "esbenp.prettier-vscode",
+                    "editor.unicodeHighlight.ambiguousCharacters": false,
+                    "editor.unicodeHighlight.invisibleCharacters": false,
+                    "diffEditor.ignoreTrimWhitespace": false,
+                    "editor.wordWrap": "on",
+                    "editor.quickSuggestions": {
+                        "comments": "off",
+                        "strings": "off",
+                        "other": "off"
+                    }
+                },
+                "prettier.proseWrap": "always",
+                "markdownlint.config": {
+                    "no-duplicate-heading": {
+                        "siblings_only": true
+                    }
+                },
+                "files.insertFinalNewline": true,
+                "terminal.integrated.defaultProfile.linux": "bash",
+                "terminal.integrated.profiles.linux": { "bash": { "path": "bash" } }
+            }
+        }
+    },
+    "workspaceFolder": "/workspaces/wlroots",
+    "workspaceMount": "source=${localWorkspaceFolder},target=/workspaces/wlroots,type=bind,consistency=cached",
+    "remoteUser": "ubuntu",
+    "postCreateCommand": "meson setup build/",
+    "mounts": [
+        "source=config-wlroots,target=/home/ubuntu/persistent-config,type=volume",
+        "source=/etc/localtime,target=/usr/share/zoneinfo/hostlocaltime,type=bind,readonly"
+    ]
+}
