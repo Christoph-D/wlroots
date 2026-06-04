@@ -1,4 +1,5 @@
 #include <assert.h>
+#include <math.h>
 #include <stdlib.h>
 #include <string.h>
 #include <wlr/render/color.h>
@@ -26,10 +27,17 @@ struct wlr_color_transform *wlr_color_transform_init_srgb(void) {
 	if (!tx) {
 		return NULL;
 	}
-	tx->type = COLOR_TRANSFORM_SRGB;
-	tx->ref_count = 1;
-	wlr_addon_set_init(&tx->addons);
+	wlr_color_transform_init(tx, COLOR_TRANSFORM_SRGB);
 	return tx;
+}
+
+void wlr_color_transform_init(struct wlr_color_transform *tr,
+		enum wlr_color_transform_type type) {
+	*tr = (struct wlr_color_transform){
+		.type = type,
+		.ref_count = 1,
+	};
+	wlr_addon_set_init(&tr->addons);
 }
 
 static void color_transform_destroy(struct wlr_color_transform *tr) {
@@ -40,6 +48,21 @@ static void color_transform_destroy(struct wlr_color_transform *tr) {
 		struct wlr_color_transform_lut3d *lut3d =
 			wlr_color_transform_lut3d_from_base(tr);
 		free(lut3d->lut_3d);
+		break;
+	case COLOR_TRANSFORM_LCMS2:
+		color_transform_lcms2_finish(color_transform_lcms2_from_base(tr));
+		break;
+	case COLOR_TRANSFORM_LUT_3X1D:;
+		struct wlr_color_transform_lut_3x1d *lut_3x1d = color_transform_lut_3x1d_from_base(tr);
+		free(lut_3x1d->lut_3x1d);
+		break;
+	case COLOR_TRANSFORM_PIPELINE:;
+		struct wlr_color_transform_pipeline *pipeline =
+			wl_container_of(tr, pipeline, base);
+		for (size_t i = 0; i < pipeline->len; i++) {
+			wlr_color_transform_unref(pipeline->transforms[i]);
+		}
+		free(pipeline->transforms);
 		break;
 	}
 	wlr_addon_set_finish(&tr->addons);
@@ -67,6 +90,114 @@ struct wlr_color_transform_lut3d *wlr_color_transform_lut3d_from_base(
 	assert(tr->type == COLOR_TRANSFORM_LUT_3D);
 	struct wlr_color_transform_lut3d *lut3d = wl_container_of(tr, lut3d, base);
 	return lut3d;
+}
+
+struct wlr_color_transform_lut_3x1d *color_transform_lut_3x1d_from_base(
+		struct wlr_color_transform *tr) {
+	assert(tr->type == COLOR_TRANSFORM_LUT_3X1D);
+	struct wlr_color_transform_lut_3x1d *lut_3x1d = wl_container_of(tr, lut_3x1d, base);
+	return lut_3x1d;
+}
+
+struct wlr_color_transform *wlr_color_transform_init_lut_3x1d(size_t dim,
+		const uint16_t *r, const uint16_t *g, const uint16_t *b) {
+	uint16_t *lut_3x1d = malloc(3 * dim * sizeof(lut_3x1d[0]));
+	if (lut_3x1d == NULL) {
+		return NULL;
+	}
+
+	memcpy(&lut_3x1d[0 * dim], r, dim * sizeof(lut_3x1d[0]));
+	memcpy(&lut_3x1d[1 * dim], g, dim * sizeof(lut_3x1d[0]));
+	memcpy(&lut_3x1d[2 * dim], b, dim * sizeof(lut_3x1d[0]));
+
+	struct wlr_color_transform_lut_3x1d *tx = calloc(1, sizeof(*tx));
+	if (!tx) {
+		free(lut_3x1d);
+		return NULL;
+	}
+	wlr_color_transform_init(&tx->base, COLOR_TRANSFORM_LUT_3X1D);
+	tx->lut_3x1d = lut_3x1d;
+	tx->dim = dim;
+	return &tx->base;
+}
+
+struct wlr_color_transform *wlr_color_transform_init_pipeline(
+		struct wlr_color_transform **transforms, size_t len) {
+	assert(len > 0);
+
+	struct wlr_color_transform **copy = calloc(len, sizeof(copy[0]));
+	if (copy == NULL) {
+		return NULL;
+	}
+
+	struct wlr_color_transform_pipeline *tx = calloc(1, sizeof(*tx));
+	if (!tx) {
+		free(copy);
+		return NULL;
+	}
+	wlr_color_transform_init(&tx->base, COLOR_TRANSFORM_PIPELINE);
+
+	for (size_t i = 0; i < len; i++) {
+		assert(transforms[i] != NULL);
+		copy[i] = wlr_color_transform_ref(transforms[i]);
+	}
+
+	tx->transforms = copy;
+	tx->len = len;
+
+	return &tx->base;
+}
+
+static float lut_1d_get(const uint16_t *lut, size_t len, size_t i) {
+	if (i >= len) {
+		i = len - 1;
+	}
+	return (float)lut[i] / UINT16_MAX;
+}
+
+static float lut_1d_eval(const uint16_t *lut, size_t len, float x) {
+	double pos = x * (len - 1);
+	double int_part;
+	double frac_part = modf(pos, &int_part);
+	size_t i = (size_t)int_part;
+	double a = lut_1d_get(lut, len, i);
+	double b = lut_1d_get(lut, len, i + 1);
+	return a * (1 - frac_part) + b * frac_part;
+}
+
+static void color_transform_lut_3x1d_eval(struct wlr_color_transform_lut_3x1d *tr,
+		float out[static 3], const float in[static 3]) {
+	for (size_t i = 0; i < 3; i++) {
+		out[i] = lut_1d_eval(&tr->lut_3x1d[tr->dim * i], tr->dim, in[i]);
+	}
+}
+
+void wlr_color_transform_eval(struct wlr_color_transform *tr,
+		float out[static 3], const float in[static 3]) {
+	switch (tr->type) {
+	case COLOR_TRANSFORM_SRGB:
+		memcpy(out, in, sizeof(float) * 3);
+		break;
+	case COLOR_TRANSFORM_LUT_3D:
+		memcpy(out, in, sizeof(float) * 3);
+		break;
+	case COLOR_TRANSFORM_LCMS2:
+		color_transform_lcms2_eval(color_transform_lcms2_from_base(tr), out, in);
+		break;
+	case COLOR_TRANSFORM_LUT_3X1D:
+		color_transform_lut_3x1d_eval(color_transform_lut_3x1d_from_base(tr), out, in);
+		break;
+	case COLOR_TRANSFORM_PIPELINE:;
+		struct wlr_color_transform_pipeline *pipeline =
+			wl_container_of(tr, pipeline, base);
+		float color[3];
+		memcpy(color, in, sizeof(color));
+		for (size_t i = 0; i < pipeline->len; i++) {
+			wlr_color_transform_eval(pipeline->transforms[i], color, color);
+		}
+		memcpy(out, color, sizeof(color));
+		break;
+	}
 }
 
 void wlr_color_primaries_from_named(struct wlr_color_primaries *out,

@@ -10,6 +10,7 @@
 #define WLR_RENDER_COLOR_H
 
 #include <stdbool.h>
+#include <stdint.h>
 #include <sys/types.h>
 
 /**
@@ -72,6 +73,12 @@ struct wlr_color_transform;
 struct wlr_color_transform *wlr_color_transform_init_linear_to_icc(
 	const void *data, size_t size);
 
+struct wlr_color_transform *wlr_color_transform_init_lut_3x1d(size_t dim,
+	const uint16_t *r, const uint16_t *g, const uint16_t *b);
+
+struct wlr_color_transform *wlr_color_transform_init_pipeline(
+	struct wlr_color_transform **transforms, size_t len);
+
 /**
  * Initialize a color transformation to apply sRGB encoding.
  * Returns NULL on failure.
@@ -88,5 +95,8 @@ struct wlr_color_transform *wlr_color_transform_ref(struct wlr_color_transform *
  * all associated resources when the reference count hits zero.
  */
 void wlr_color_transform_unref(struct wlr_color_transform *tr);
+
+void wlr_color_transform_eval(struct wlr_color_transform *tr,
+	float out[static 3], const float in[static 3]);
 
 #endif

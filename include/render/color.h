@@ -2,12 +2,16 @@
 #define RENDER_COLOR_H
 
 #include <stdint.h>
+#include <lcms2.h>
 #include <wlr/render/color.h>
 #include <wlr/util/addon.h>
 
 enum wlr_color_transform_type {
 	COLOR_TRANSFORM_SRGB,
 	COLOR_TRANSFORM_LUT_3D,
+	COLOR_TRANSFORM_LCMS2,
+	COLOR_TRANSFORM_LUT_3X1D,
+	COLOR_TRANSFORM_PIPELINE,
 };
 
 struct wlr_color_transform {
@@ -44,6 +48,50 @@ struct wlr_color_transform_lut3d {
  */
 struct wlr_color_transform_lut3d *wlr_color_transform_lut3d_from_base(
 	struct wlr_color_transform *tr);
+
+struct wlr_color_transform_lcms2 {
+	struct wlr_color_transform base;
+
+	cmsContext ctx;
+	cmsHTRANSFORM lcms;
+};
+
+struct wlr_color_transform_lut_3x1d {
+	struct wlr_color_transform base;
+
+	uint16_t *lut_3x1d;
+	size_t dim;
+};
+
+struct wlr_color_transform_pipeline {
+	struct wlr_color_transform base;
+
+	struct wlr_color_transform **transforms;
+	size_t len;
+};
+
+void wlr_color_transform_init(struct wlr_color_transform *tr,
+	enum wlr_color_transform_type type);
+
+struct wlr_color_transform_lcms2 *color_transform_lcms2_from_base(
+	struct wlr_color_transform *tr);
+
+void color_transform_lcms2_finish(struct wlr_color_transform_lcms2 *tr);
+
+void color_transform_lcms2_eval(struct wlr_color_transform_lcms2 *tr,
+	float out[static 3], const float in[static 3]);
+
+struct wlr_color_transform_lut_3x1d *color_transform_lut_3x1d_from_base(
+	struct wlr_color_transform *tr);
+
+struct wlr_color_transform *wlr_color_transform_init_lut_3x1d(size_t dim,
+	const uint16_t *r, const uint16_t *g, const uint16_t *b);
+
+struct wlr_color_transform *wlr_color_transform_init_pipeline(
+	struct wlr_color_transform **transforms, size_t len);
+
+void wlr_color_transform_eval(struct wlr_color_transform *tr,
+	float out[static 3], const float in[static 3]);
 
 /**
  * Obtain primaries values from a well-known primaries name.
