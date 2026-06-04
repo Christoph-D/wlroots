@@ -1,5 +1,6 @@
 #include <assert.h>
 #include <lcms2.h>
+#include <stdbool.h>
 #include <stdlib.h>
 #include <wlr/util/log.h>
 #include <wlr/render/color.h>
@@ -24,9 +25,58 @@ static void handle_lcms_error(cmsContext ctx, cmsUInt32Number code, const char *
 	wlr_log(WLR_ERROR, "[lcms] %s", text);
 }
 
+#define VCGT_LUT_SIZE 256
+
+static uint16_t eval_vcgt_u16(cmsToneCurve *curve, float t) {
+	float val = cmsEvalToneCurveFloat(curve, t);
+	if (val <= 0.0f) {
+		return 0;
+	}
+	if (val >= 1.0f) {
+		return 65535;
+	}
+	return (uint16_t)(val * 65535.0f + 0.5f);
+}
+
+static bool sample_vcgt(cmsHPROFILE profile,
+		uint16_t **r_out, uint16_t **g_out, uint16_t **b_out) {
+	*r_out = NULL;
+	*g_out = NULL;
+	*b_out = NULL;
+
+	cmsToneCurve **curves = (cmsToneCurve **)cmsReadTag(profile, cmsSigVcgtTag);
+	if (curves == NULL || curves[0] == NULL
+			|| curves[1] == NULL || curves[2] == NULL) {
+		return false;
+	}
+
+	uint16_t *r = malloc(VCGT_LUT_SIZE * sizeof(uint16_t));
+	uint16_t *g = malloc(VCGT_LUT_SIZE * sizeof(uint16_t));
+	uint16_t *b = malloc(VCGT_LUT_SIZE * sizeof(uint16_t));
+	if (r == NULL || g == NULL || b == NULL) {
+		free(r);
+		free(g);
+		free(b);
+		return false;
+	}
+
+	for (size_t i = 0; i < VCGT_LUT_SIZE; i++) {
+		float t = (float)i / (float)(VCGT_LUT_SIZE - 1);
+		r[i] = eval_vcgt_u16(curves[0], t);
+		g[i] = eval_vcgt_u16(curves[1], t);
+		b[i] = eval_vcgt_u16(curves[2], t);
+	}
+
+	*r_out = r;
+	*g_out = g;
+	*b_out = b;
+	return true;
+}
+
 struct wlr_color_transform *wlr_color_transform_init_linear_to_icc(
 		const void *data, size_t size) {
 	struct wlr_color_transform_lcms2 *tx = NULL;
+	uint16_t *vcgt_r = NULL, *vcgt_g = NULL, *vcgt_b = NULL;
 
 	cmsContext ctx = cmsCreateContext(NULL, NULL);
 	if (ctx == NULL) {
@@ -47,10 +97,12 @@ struct wlr_color_transform *wlr_color_transform_init_linear_to_icc(
 		goto error_icc_profile;
 	}
 
+	bool has_vcgt = sample_vcgt(icc_profile, &vcgt_r, &vcgt_g, &vcgt_b);
+
 	cmsToneCurve *linear_tone_curve = cmsBuildGamma(ctx, 1);
 	if (linear_tone_curve == NULL) {
 		wlr_log(WLR_ERROR, "cmsBuildGamma failed");
-		goto error_icc_profile;
+		goto error_vcgt;
 	}
 
 	cmsToneCurve *linear_tf[] = {
@@ -63,7 +115,7 @@ struct wlr_color_transform *wlr_color_transform_init_linear_to_icc(
 	cmsFreeToneCurve(linear_tone_curve);
 	if (srgb_profile == NULL) {
 		wlr_log(WLR_ERROR, "cmsCreateRGBProfileTHR failed");
-		goto error_icc_profile;
+		goto error_vcgt;
 	}
 
 	cmsHTRANSFORM lcms_tr = cmsCreateTransformTHR(ctx,
@@ -73,21 +125,51 @@ struct wlr_color_transform *wlr_color_transform_init_linear_to_icc(
 	cmsCloseProfile(icc_profile);
 	if (lcms_tr == NULL) {
 		wlr_log(WLR_ERROR, "cmsCreateTransformTHR failed");
-		goto error_ctx;
+		goto error_vcgt_closed;
 	}
 
 	tx = calloc(1, sizeof(*tx));
 	if (!tx) {
 		cmsDeleteTransform(lcms_tr);
-		goto error_ctx;
+		goto error_vcgt_closed;
 	}
 	wlr_color_transform_init(&tx->base, COLOR_TRANSFORM_LCMS2);
 
 	tx->ctx = ctx;
 	tx->lcms = lcms_tr;
 
-	return &tx->base;
+	if (!has_vcgt) {
+		return &tx->base;
+	}
 
+	struct wlr_color_transform *vcgt_transform = wlr_color_transform_init_lut_3x1d(
+		VCGT_LUT_SIZE, vcgt_r, vcgt_g, vcgt_b);
+	free(vcgt_r);
+	free(vcgt_g);
+	free(vcgt_b);
+	if (vcgt_transform == NULL) {
+		return &tx->base;
+	}
+
+	struct wlr_color_transform *transforms[] = { &tx->base, vcgt_transform };
+	struct wlr_color_transform *pipeline =
+		wlr_color_transform_init_pipeline(transforms, 2);
+	wlr_color_transform_unref(vcgt_transform);
+	if (pipeline == NULL) {
+		return &tx->base;
+	}
+	wlr_color_transform_unref(&tx->base);
+	return pipeline;
+
+error_vcgt_closed:
+	free(vcgt_r);
+	free(vcgt_g);
+	free(vcgt_b);
+	goto error_ctx;
+error_vcgt:
+	free(vcgt_r);
+	free(vcgt_g);
+	free(vcgt_b);
 error_icc_profile:
 	cmsCloseProfile(icc_profile);
 error_ctx:
